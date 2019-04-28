@@ -1,0 +1,311 @@
+---
+title: "Airbnb NYC Price Prediction"
+author: "Max Karsok"
+date: "April 28, 2019"
+output: html_document
+---
+
+Step 00: Load relevant libraries.
+
+```{R message=FALSE, warning=FALSE}
+if(!require("dplyr")){
+  install.packages("dplyr")}
+  library(dplyr)
+if(!require("tidyr")){
+  install.packages("tidyr")}
+  library(tidyr)
+if(!require("ggplot2")){
+  install.packages("ggplot2")}
+  library(ggplot2)
+if(!require("caTools")){
+  install.packages("caTools")}
+  library(caTools)
+if(!require("caret")){
+  install.packages("caret")}
+  library(caret)
+if(!require("car")){
+  install.packages("car")}
+  library(car)
+if(!require("glmnet")){
+  install.packages("glmnet")}
+  library(glmnet)
+if(!require("rpart")){
+  install.packages("rpart")}
+  library(rpart)
+if(!require("rpart.plot")){
+  install.packages("rpart.plot")}
+  library(rpart.plot)
+if(!require("randomForest")){
+  install.packages("randomForest")}
+  library(randomForest)
+if(!require("corrplot")){
+  install.packages("corrplot")}
+  library(corrplot)
+if(!require("stringr")){
+  install.packages("stringr")}
+  library(stringr)
+if(!require("e1071")){
+  install.packages("e1071")}
+  library(e1071)
+```
+
+Step 01: Load Data.
+
+```{R message=FALSE, warning=FALSE}
+setwd('C:/Users/mkars/Documents/GitHub/NYCAirbnbPrediction')
+base <- read.csv('../data/airbnblistings.csv.csv')
+zip_data <- read.csv('../data/ny_zip_LOD.csv')
+```
+
+Step 02: Exploratory analysis.
+
+```{R message=FALSE, warning=FALSE}
+ # summary statistics against dependent variable #
+base %>%
+  group_by(accommodates) %>%
+  summarize(price = mean(price)) %>%
+  ggplot(aes(x = accommodates, y = price)) +
+  geom_bar(stat = 'identity', color = 'black', fill = '#FE5B61') +
+  geom_smooth(color = 'black') +
+  ggtitle('price by accommodates variable')
+
+ # coorelation of selected variables #
+coorelation_df <- 
+  base %>%
+  select(price,accommodates,cleaning_fee,beds,bathrooms,
+         number_of_reviews,security_deposit,bedrooms)
+coorelation <- corrplot(cor(coorelation_df, use = 'complete.obs'), 
+                        method = 'color', type = 'upper', tl.col = 'black',
+                        col = colorRampPalette(c('black','white','#FE5B61'))(100),
+                        addCoef.col = 'black', number.digits = 2)
+```
+
+Step 03: Clean.
+
+```{R}
+base <- merge(x = base, y = zip_data, by = 'zipcode', all.x = TRUE)
+base$amenities_cnt <- str_count(base$amenities, ',') + 1
+base$first_review <- as.Date(base$first_review, "%Y-%m-%d")
+base$last_review <- as.Date(base$last_review, "%Y-%m-%d")
+base$calendar_last_scraped <- as.Date(base$calendar_last_scraped, "%Y-%m-%d")
+base$med_income[is.na(base$med_income)] <- round(mean(base$med_income, na.rm = TRUE))
+base$pop[is.na(base$pop)] <- round(mean(base$pop, na.rm = TRUE))
+base$security_deposit[is.na(base$security_deposit)] <- 0
+base$parking <- grepl('Free street parking|Free parking on premises', base$amenities)
+base$manhattan <- grepl('Manhattan', base$neighbourhood_group_cleansed)
+base$brooklyn <- grepl('Brooklyn', base$neighbourhood_group_cleansed)
+base$neighb_tag <- grepl("Tribeca|Flatiron District|SoHo|NoHo|Midtown|West Village|
+                         Chelsea|Theater District|Greenwich Village|Kips Bay
+                         `Hell's Kitchen`|Civic Center|Unionport|Murray Hill|Gramercy|
+                         Carroll Gardens|Nolita|Financial District|
+                         Battery Park City|Upper West Side", 
+                         base$neighbourhood_cleansed)
+base$weekly_price[is.na(base$weekly_price)] <- 0
+base$monthly_price[is.na(base$monthly_price)] <- 0
+base$host_response_rate <- as.numeric(base$host_response_rate)
+base$host_response_rate[is.na(base$host_response_rate)] <-
+  round(mean(base$host_response_rate, na.rm = TRUE))
+base$host_is_superhost <- ifelse(base$host_is_superhost == 't', 1,0)
+base$host_has_profile_pic <- ifelse(base$host_has_profile_pic == 't', 1,0)
+base$host_identity_verified <- ifelse(base$host_identity_verified == 't', 1,0)
+base$is_location_exact <- ifelse(base$is_location_exact == 't', 1,0)
+base$room_type_entire <- ifelse(base$room_type == 'Entire home/apt', 1,0); 
+base$room_type_private <- ifelse(base$room_type == 'Private room', 1,0); 
+base$room_type_shared <- ifelse(base$room_type == 'Shared room', 1,0); 
+base$security_deposit[is.na(base$security_deposit)] <- 0
+base$cleaning_fee[is.na(base$cleaning_fee)] <- 0
+base$first_review[is.na(base$first_review)] <- round(mean(base$first_review, na.rm = TRUE))
+base$last_review[is.na(base$last_review)] <- round(mean(base$last_review, na.rm = TRUE))
+base$from_first_review <- base$first_review - min(base$first_review)
+base$from_last_review <- max(base$last_review) - base$last_review
+base$instant_bookable <- ifelse(base$instant_bookable == 't', 1,0)
+base$is_business_travel_ready <- ifelse(base$is_business_travel_ready == 't', 1,0)
+base$require_guest_profile_picture <- ifelse(base$require_guest_profile_picture == 't', 1,0)
+base$require_guest_phone_verification <- ifelse(base$require_guest_phone_verification == 't', 1,0)
+base$beds[is.na(base$beds)] <- 0
+```
+
+Step 04: Split the data for prediction.
+
+```{R}
+set.seed(100)
+index <- createDataPartition(base$price, p = .7, groups = 100, list = FALSE, times = 1)
+train <- base[ index,]
+test <- base[-index,]
+```
+
+Step 05: Forward stepwise feature selection.
+
+```{R message=FALSE, warning=FALSE}
+#forward stepwise feature selection#
+start_mod_f <- lm(price~1,data=train)
+empty_mod_f <- lm(price~1,data=train)
+full_mod_f  <- lm(price ~ host_response_rate + 
+                    host_is_superhost + 
+                    host_listings_count + 
+                    host_total_listings_count + 
+                    host_has_profile_pic +
+                    host_identity_verified + 
+                    latitude + 
+                    longitude + 
+                    is_location_exact + 
+                    accommodates +
+                    bathrooms +
+                    bedrooms +
+                    beds +
+                    weekly_price +
+                    monthly_price +
+                    security_deposit +
+                    cleaning_fee + 
+                    guests_included + 
+                    extra_people +
+                    minimum_nights +
+                    maximum_nights +
+                    from_first_review +
+                    from_last_review +
+                    availability_30 + 
+                    availability_60 + 
+                    availability_90 + 
+                    availability_365 + 
+                    number_of_reviews +
+                    first_review + 
+                    amenities_cnt + 
+                    last_review + 
+                    review_scores_rating +
+                    review_scores_accuracy +
+                    review_scores_cleanliness + 
+                    review_scores_checkin +
+                    review_scores_communication +
+                    review_scores_location +
+                    review_scores_value + 
+                    instant_bookable + 
+                    is_business_travel_ready +
+                    require_guest_profile_picture + 
+                    require_guest_phone_verification +
+                    calculated_host_listings_count + 
+                    reviews_per_month +
+                    pop + 
+                    med_income + 
+                    neighb_tag +
+                    manhattan + 
+                    brooklyn + 
+                    parking +
+                    room_type_entire +
+                    room_type_private +
+                    room_type_shared, 
+                  train)
+forwardStepwise <- step(start_mod_f,
+                        scope=list(upper=full_mod_f,
+                                   lower=empty_mod_f),
+                        direction='forward')
+```
+
+step 06: execute random forest. 
+
+```{R}
+set.seed(100)
+model_forest <- randomForest(price ~ 
+                               accommodates + 
+                               med_income + 
+                               cleaning_fee +
+                               manhattan +
+                               room_type_entire + 
+                               bathrooms +
+                               bedrooms + 
+                               availability_30 +
+                               neighb_tag + 
+                               longitude +
+                               from_last_review +
+                               review_scores_location +
+                               weekly_price + 
+                               room_type_private +
+                               review_scores_rating + 
+                               review_scores_value + 
+                               reviews_per_month + 
+                               minimum_nights + 
+                               amenities_cnt + 
+                               parking  + 
+                               availability_365 +
+                               beds + 
+                               host_is_superhost + 
+                               pop + 
+                               review_scores_checkin  +
+                               review_scores_cleanliness + 
+                               is_business_travel_ready + 
+                               security_deposit + 
+                               latitude + 
+                               review_scores_communication + 
+                               host_identity_verified +
+                               extra_people + 
+                               availability_90 + 
+                               review_scores_accuracy + 
+                               guests_included + 
+                               calculated_host_listings_count + 
+                               require_guest_phone_verification +
+                               availability_60, 
+                             train, 
+                             ntree = 400,
+                             mtry = 6)
+```
+
+Step 08: Compare to a baseline linear model. 
+```{R}
+model_lm <- lm(price ~ 
+                 accommodates +
+                 med_income + 
+                 cleaning_fee + 
+                 manhattan + 
+                 room_type_entire +
+                 bathrooms + 
+                 bedrooms + 
+                 availability_30 + 
+                 neighb_tag + 
+                 longitude + 
+                 from_last_review + 
+                 review_scores_location + 
+                 weekly_price + 
+                 room_type_private + 
+                 review_scores_rating + 
+                 review_scores_value + 
+                 reviews_per_month + 
+                 minimum_nights + 
+                 amenities_cnt + 
+                 parking + 
+                 availability_365 +
+                 beds + 
+                 host_is_superhost + 
+                 pop + 
+                 review_scores_checkin + 
+                 review_scores_cleanliness + 
+                 is_business_travel_ready + 
+                 security_deposit + 
+                 latitude + 
+                 review_scores_communication + 
+                 host_identity_verified + 
+                 extra_people + 
+                 availability_90 + 
+                 review_scores_accuracy + 
+                 guests_included + 
+                 calculated_host_listings_count +
+                 require_guest_phone_verification + 
+                 availability_60,
+               train)
+```
+
+Step 07: Test.
+
+```{R}
+#rmse on test set#
+pred_forest <- predict(model_forest, test)
+sqrt(mean((pred_forest - test$price)^2))
+#residual plot#
+plot(pred_forest, pred_forest - test$price, 
+     col = '#FE5B61', pch = 19, cex.axis = .85, cex.lab = .85)
+#rmse on test set#
+pred_lm <- predict(model_lm, test)
+sqrt(mean((pred_lm - test$price)^2))
+plot(pred_lm, pred_lm - test$price, 
+     col = '#FE5B61', pch = 19, cex.axis = .85, cex.lab = .85)
+```
+
+
