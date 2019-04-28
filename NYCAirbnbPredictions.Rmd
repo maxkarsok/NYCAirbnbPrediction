@@ -348,11 +348,11 @@ data.frame('model' = c('Random Forest', 'Linear Regression'),
                   round(((rmse_rf - rmse_lm) / rmse_lm) * -100, 2), '%', sep = ''))
 ```
 
-Step 09: Citations.
-Please reference the summary report for commentary and future analysis.
+Step 09: Citations.  
+Please reference the summary report for commentary and future analysis.  
 (I) James et. al (2017). An Introduction to Statistical Learning. Springer Texts in Statistics. Springer. 
-	Retrieved on September 15, 2018. 
-(2) U.S. Census (2018). American FactFinder. The U.S. Census. Retrieved on November 1st, 2018, from 	https://factfinder.census.gov/faces/nav/jsf/pages/index.xhtml
-(3) The following R packages were utilized to develop this model:
+	Retrieved on September 15, 2018.  
+(2) U.S. Census (2018). American FactFinder. The U.S. Census. Retrieved on November 1st, 2018, from 	https://factfinder.census.gov/faces/nav/jsf/pages/index.xhtml  
+(3) The following R packages were utilized to develop this model:  
 dplyr, ggplot2, tidyr, sqldf, caTools, caret, car, glmnet, rpart, rpart.plot, randomForest, corrplot, stringr, e1071, ggmap.
 
