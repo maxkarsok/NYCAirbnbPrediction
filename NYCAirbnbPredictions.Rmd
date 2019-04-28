@@ -1,9 +1,11 @@
 ---
 title: "Airbnb NYC Price Prediction"
 author: "Max Karsok"
-date: "April 28, 2019"
+date: "December 2018"
 output: html_document
 ---
+
+This process will predict the price of an Airbnb listing in New York City based on a variety of provided and engineered features. The listings were scraped from Airbnb across three days in March 2018. This process was built with the following version of R 3.5.2. Please contact Max Karsok (mkarsok@gmail.com) with any questions.
 
 Step 00: Load relevant libraries.
 
@@ -47,20 +49,36 @@ if(!require("stringr")){
 if(!require("e1071")){
   install.packages("e1071")}
   library(e1071)
+if(!require("ggmap")){
+  install.packages("ggmap")}
+  library(ggmap)
 ```
 
-Step 01: Load Data.
+Step 01: Load the provided airbnb listings data, and 3rd party population and income data by zip code accessed through the census bureau. 
 
 ```{R message=FALSE, warning=FALSE}
-setwd('C:/Users/mkars/Documents/GitHub/NYCAirbnbPrediction')
-base <- read.csv('../data/airbnblistings.csv.csv')
-zip_data <- read.csv('../data/ny_zip_LOD.csv')
+base <- read.csv('airbnblistings.csv')
+zip_data <- read.csv('ny_zip_LOD.csv')
 ```
 
-Step 02: Exploratory analysis.
+Step 02: Exploration. Before building and selecting features or designing the random forest, we will briefly pose questions against the dataset to build understanding. 
 
 ```{R message=FALSE, warning=FALSE}
- # summary statistics against dependent variable #
+ # Where are the listings located? #
+register_google('AIzaSyBfQD4gSCEB6BJEVlC7gS7jpj-BMIZvCYE')
+map <- get_map(center = c(lon = -73.95351, lat = 40.72993),
+                    zoom = 11, scale = 2,
+                    maptype ='hybrid',
+                    color = 'color',
+                    key = map_key)
+ggmap(map) + 
+  geom_point(aes(x = base$longitude, 
+                 y = base$latitude, 
+                 colour = base$neighbourhood_group_cleansed), 
+             data = base) +
+  theme(legend.title = element_blank())
+
+ # Is there a relationship between the # of people a listing accomodates and its price? #
 base %>%
   group_by(accommodates) %>%
   summarize(price = mean(price)) %>%
@@ -69,7 +87,7 @@ base %>%
   geom_smooth(color = 'black') +
   ggtitle('price by accommodates variable')
 
- # coorelation of selected variables #
+ # Select a few variables that intuitively seem they would effect the price and test the coorelation. #
 coorelation_df <- 
   base %>%
   select(price,accommodates,cleaning_fee,beds,bathrooms,
@@ -80,31 +98,40 @@ coorelation <- corrplot(cor(coorelation_df, use = 'complete.obs'),
                         addCoef.col = 'black', number.digits = 2)
 ```
 
-Step 03: Clean.
+Step 03: Merging data, cleaning identified data issues, and engineering basic features to be tested for significance.
 
 ```{R}
+ # Merge the zip code demographic data #
 base <- merge(x = base, y = zip_data, by = 'zipcode', all.x = TRUE)
+ # Count the number of listed amenitites as a feature #
 base$amenities_cnt <- str_count(base$amenities, ',') + 1
+ # Clean date fields and update data types#
 base$first_review <- as.Date(base$first_review, "%Y-%m-%d")
 base$last_review <- as.Date(base$last_review, "%Y-%m-%d")
 base$calendar_last_scraped <- as.Date(base$calendar_last_scraped, "%Y-%m-%d")
+base$host_response_rate <- as.numeric(base$host_response_rate)
+ # Impute missing demographic data with the dataset average # 
 base$med_income[is.na(base$med_income)] <- round(mean(base$med_income, na.rm = TRUE))
 base$pop[is.na(base$pop)] <- round(mean(base$pop, na.rm = TRUE))
+ # Assume that if the security deposit and cleaning fee is NA, it is $0 #
 base$security_deposit[is.na(base$security_deposit)] <- 0
+base$cleaning_fee[is.na(base$cleaning_fee)] <- 0
+ # Perform basic search on the text fields to look for the free parking amenity #
 base$parking <- grepl('Free street parking|Free parking on premises', base$amenities)
+ # Create tabs for Manhattan and Brookyln boros #
 base$manhattan <- grepl('Manhattan', base$neighbourhood_group_cleansed)
 base$brooklyn <- grepl('Brooklyn', base$neighbourhood_group_cleansed)
+ # A separate test on what neighborhoods were the most expensive was conducted, and this feature extracts those neighborhoods from the rest #
 base$neighb_tag <- grepl("Tribeca|Flatiron District|SoHo|NoHo|Midtown|West Village|
                          Chelsea|Theater District|Greenwich Village|Kips Bay
                          `Hell's Kitchen`|Civic Center|Unionport|Murray Hill|Gramercy|
                          Carroll Gardens|Nolita|Financial District|
                          Battery Park City|Upper West Side", 
                          base$neighbourhood_cleansed)
+ # Assume if the weekly and monthly price is not provided, it is not offered #
 base$weekly_price[is.na(base$weekly_price)] <- 0
 base$monthly_price[is.na(base$monthly_price)] <- 0
-base$host_response_rate <- as.numeric(base$host_response_rate)
-base$host_response_rate[is.na(base$host_response_rate)] <-
-  round(mean(base$host_response_rate, na.rm = TRUE))
+ # Updating and simplifying fields with binary responses #
 base$host_is_superhost <- ifelse(base$host_is_superhost == 't', 1,0)
 base$host_has_profile_pic <- ifelse(base$host_has_profile_pic == 't', 1,0)
 base$host_identity_verified <- ifelse(base$host_identity_verified == 't', 1,0)
@@ -112,20 +139,22 @@ base$is_location_exact <- ifelse(base$is_location_exact == 't', 1,0)
 base$room_type_entire <- ifelse(base$room_type == 'Entire home/apt', 1,0); 
 base$room_type_private <- ifelse(base$room_type == 'Private room', 1,0); 
 base$room_type_shared <- ifelse(base$room_type == 'Shared room', 1,0); 
-base$security_deposit[is.na(base$security_deposit)] <- 0
-base$cleaning_fee[is.na(base$cleaning_fee)] <- 0
-base$first_review[is.na(base$first_review)] <- round(mean(base$first_review, na.rm = TRUE))
-base$last_review[is.na(base$last_review)] <- round(mean(base$last_review, na.rm = TRUE))
-base$from_first_review <- base$first_review - min(base$first_review)
-base$from_last_review <- max(base$last_review) - base$last_review
 base$instant_bookable <- ifelse(base$instant_bookable == 't', 1,0)
 base$is_business_travel_ready <- ifelse(base$is_business_travel_ready == 't', 1,0)
 base$require_guest_profile_picture <- ifelse(base$require_guest_profile_picture == 't', 1,0)
 base$require_guest_phone_verification <- ifelse(base$require_guest_phone_verification == 't', 1,0)
+ # impute some of the missing fields with the column mean or 0, case dependent #
+base$host_response_rate[is.na(base$host_response_rate)] <-
+  round(mean(base$host_response_rate, na.rm = TRUE))
+base$first_review[is.na(base$first_review)] <- round(mean(base$first_review, na.rm = TRUE))
+base$last_review[is.na(base$last_review)] <- round(mean(base$last_review, na.rm = TRUE))
 base$beds[is.na(base$beds)] <- 0
+ # Create features about the days since certain reviews of the listing
+base$from_first_review <- base$first_review - min(base$first_review)
+base$from_last_review <- max(base$last_review) - base$last_review
 ```
 
-Step 04: Split the data for prediction.
+Step 04: Split the data for training and testing. 
 
 ```{R}
 set.seed(100)
@@ -134,9 +163,9 @@ train <- base[ index,]
 test <- base[-index,]
 ```
 
-Step 05: Forward stepwise feature selection.
+Step 05: For all available features, conduct forward stepwise selection to identify the variables to be used in the random forest. The variables that are identified are applied in the following steps. 
 
-```{R message=FALSE, warning=FALSE}
+```{R message=FALSE, warning=FALSE, include=FALSE}
 #forward stepwise feature selection#
 start_mod_f <- lm(price~1,data=train)
 empty_mod_f <- lm(price~1,data=train)
@@ -200,7 +229,7 @@ forwardStepwise <- step(start_mod_f,
                         direction='forward')
 ```
 
-step 06: execute random forest. 
+Step 06: Based on the stepwise, build the random forest on the train data. Please see the summary report to see the logic on identifying the values for the parameters ntree and mtry.
 
 ```{R}
 set.seed(100)
@@ -248,7 +277,8 @@ model_forest <- randomForest(price ~
                              mtry = 6)
 ```
 
-Step 08: Compare to a baseline linear model. 
+Step 07: To understand the effectiveness of the random forest, we use the same selected features to build a basic linear regression for a comparison. 
+
 ```{R}
 model_lm <- lm(price ~ 
                  accommodates +
@@ -292,20 +322,37 @@ model_lm <- lm(price ~
                train)
 ```
 
-Step 07: Test.
+Step 08: Compare the RMSE and residual plots of Random Forest model and the "baseline" linear regression.
 
-```{R}
+```{R message=FALSE, warning=FALSE}
 #rmse on test set#
 pred_forest <- predict(model_forest, test)
-sqrt(mean((pred_forest - test$price)^2))
+rmse_rf <- sqrt(mean((pred_forest - test$price)^2))
 #residual plot#
 plot(pred_forest, pred_forest - test$price, 
      col = '#FE5B61', pch = 19, cex.axis = .85, cex.lab = .85)
 #rmse on test set#
 pred_lm <- predict(model_lm, test)
-sqrt(mean((pred_lm - test$price)^2))
+rmse_lm <- sqrt(mean((pred_lm - test$price)^2))
 plot(pred_lm, pred_lm - test$price, 
      col = '#FE5B61', pch = 19, cex.axis = .85, cex.lab = .85)
+
+data.frame('model' = c('Random Forest', 'Linear Regression'),
+                         'RMSE' = c(rmse_rf,rmse_lm)) %>%
+  ggplot(aes(x = model, y = RMSE)) +
+  geom_bar(aes(fill = '#FE5B61'), stat = 'identity') +
+  coord_flip() +
+  theme(legend.position = 'none') +
+  geom_text(aes(y = RMSE, label = round(RMSE,4)), nudge_y = 5) +
+  ggtitle(paste('Random Forest Outperforms Linear Regression by ',
+                  round(((rmse_rf - rmse_lm) / rmse_lm) * -100, 2), '%', sep = ''))
 ```
 
+Step 09: Citations.
+Please reference the summary report for commentary and future analysis.
+(I) James et. al (2017). An Introduction to Statistical Learning. Springer Texts in Statistics. Springer. 
+	Retrieved on September 15, 2018. 
+(2) U.S. Census (2018). American FactFinder. The U.S. Census. Retrieved on November 1st, 2018, from 	https://factfinder.census.gov/faces/nav/jsf/pages/index.xhtml
+(3) The following R packages were utilized to develop this model:
+dplyr, ggplot2, tidyr, sqldf, caTools, caret, car, glmnet, rpart, rpart.plot, randomForest, corrplot, stringr, e1071, ggmap.
 
